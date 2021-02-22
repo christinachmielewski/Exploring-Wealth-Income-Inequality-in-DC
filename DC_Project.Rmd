@@ -1,0 +1,544 @@
+---
+title: "Final Paper"
+author: "STOR 320(1) Group 5"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: html_document
+---
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(RColorBrewer)
+library(purrr)
+library(zipcode)
+library(ggplot2)
+library(sf)
+library(modelr)
+library(lubridate)
+library(data.table)
+library(ggrepel)
+library(ggmap)
+library(date)
+library(readxl)
+library(plotrix)
+library(xtable)
+library(caret)
+
+CAMAR <- read_csv("FinalProject/ResidentialApprasials.csv")
+AP <- read_csv("FinalProject/Address_Points.csv")
+ZCS <- read_csv("FinalProject/ZipCodeStats.csv")
+businesses <- read_csv("FinalProject/Businesses.csv")
+census2010 <- read_csv("FinalProject/Census_Tracts_in_2010.csv")
+hospitals <- read_csv("FinalProject/localHospitals.csv")
+quickFacts<- read_csv("FinalProject/DC.quickfacts.csv")
+FS<-read_csv("FinalProject/Fire_Stations.csv")
+TaxLotsHistorical <- read_csv("FinalProject/TaxLots.csv")
+
+geoidfix <- read_excel("FinalProject/geoidfix.xlsx")
+geoidtozip <- read_excel("FinalProject/geoid-to-zip.xlsx")
+incomedata<- read_excel("FinalProject/DCincomedata.xlsx")
+
+modeling<-read_excel("FinalProject/leftismodel1rightismodel2.xlsx")
+
+#google maps datasets
+incidents= read.csv('https://raw.githubusercontent.com/lgellis/MiscTutorial/master/ggmap/i2Sample.csv', stringsAsFactors = FALSE)
+n <- read.csv('https://raw.githubusercontent.com/lgellis/MiscTutorial/master/ggmap/n.csv', stringsAsFactors = FALSE)
+```
+#Data Tidying 
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+CAMAR %>%
+  select(SSL)
+
+separate(CAMAR, SSL, c("Square Suffix", "Lot"))
+
+AP1 <- AP %>%
+  select(SSL, SQUARE, LOT, SUFFIX, XCOORD, YCOORD, ZIPCODE, ZIPCODE4, LATITUDE, LONGITUDE)
+
+CAMAR = CAMAR %>%
+  left_join(AP1, by = "SSL")
+
+CAMAR <- select(CAMAR, SSL, PRICE,SQUARE, XCOORD, YCOORD, ZIPCODE, LATITUDE, LONGITUDE)
+CAMAR <- filter(CAMAR, PRICE>0, ZIPCODE>0)
+
+```
+#code for google maps
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+dim(incidents)
+attach(incidents)
+dim(n)
+attach(n)
+
+col1 = "#011f4b"
+col2 = "#6497b1"
+col3 = "#b3cde0"
+col4 = "#CC0000"
+
+#add year to the incidents data frame
+incidents$ymd <-mdy_hms(Event.Clearance.Date)
+incidents$year <- year(incidents$ymd)
+
+#Create a more manageable data frame with only 2017 and 2018 data
+i2 <- incidents %>% 
+  filter(year>=2017 & year<=2018)
+
+#Only include complete cases
+i2[complete.cases(i2), ]
+
+#create a display label to the n data frame (dangerous neighbourhoods)
+n$label <-paste(Rank, Location, sep="-")
+
+#Set your API Key
+ggmap::register_google(key = "AIzaSyDTKye0LUc2XdfHpetmV9KKikRuThlyviM")
+
+
+DC <- ggmap(get_googlemap(center = c(lon = -77.025, lat =  38.9072),
+                    zoom = 12, scale = 1,
+                    maptype ='hybrid',
+                    color = 'color'))
+```
+#made a new variable based on categories of price, ggplot to show
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+priceRanges <- mutate(CAMAR, PRICERANGE=
+
+ifelse(PRICE %in% 1:250000, "1. 250,000 or less",
+
+ifelse(PRICE %in% 250000:500000, "2. 250,000 to 500,000",
+
+ifelse(PRICE %in% 500000:750000, "3. 500,000 to 750,000",
+
+ifelse(PRICE %in% 750000:1000000, "4. 750,000 to 1 million",
+
+ifelse(PRICE %in% 1000000:5000000, "5. 1 to 5 million", "Over 5 million"))))))
+
+DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=PRICERANGE), data = priceRanges, size = .5) + 
+theme(legend.position="right") +
+scale_color_brewer(palette = "YlOrRd")
+```
+#make table of price summary statistics per zip code
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+CAMAR
+priceSummary<-CAMAR %>%
+  select(PRICE, ZIPCODE) %>%
+  group_by(ZIPCODE)
+```
+#chunk on zip code stats(uninsured, medicaid recipients per zip code)
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+Z<-select(ZCS, ZIPCODE, UNINSURED_POPULATION, MEDICAID_RECIPIENT)
+
+Z <- CAMAR%>%
+  left_join(Z, by="ZIPCODE")
+
+Z<- select(Z, PRICE, ZIPCODE, UNINSURED_POPULATION, MEDICAID_RECIPIENT)
+
+Z<-rename(Z, UNINSURED=UNINSURED_POPULATION, MEDICAID=MEDICAID_RECIPIENT)
+Z<- Z[!duplicated(Z$ZIPCODE),]
+```
+#local hospitals, emergency centers, firestations
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#HOSPITALS
+hospital<-filter(hospitals, STATE=="DC")
+hospital<-select(hospital,ZIP,X,Y,ADDRESS)
+hospital<-rename(hospital, ZIPCODE=ZIP)
+camarDistinctZip<-distinct(CAMAR,ZIPCODE)
+#dataset on hospital details
+hospital <- hospital%>%
+  left_join(camarDistinctZip, by="ZIPCODE") 
+#dataset showing number of hospitals in each zipcode
+hospitalsPerZip<- count(hospital,ZIPCODE)
+hospitalsPerZip<-rename(hospitalsPerZip,"Number of Hospitals"=n)
+hospitalsPerZip<-arrange(hospitalsPerZip, ZIPCODE)
+#ds is a dataset on fire station details
+fs<-filter(FS, STATE=="DC")
+fs<-select(fs, ZIP, X, Y, ADDRESS)
+fs<-rename(fs, ZIPCODE=ZIP)
+fs <- fs %>% 
+  left_join(camarDistinctZip, by="ZIPCODE")
+#dataset showing number of hospitals in each zipcode
+fsPerZip<-count(fs, ZIPCODE)
+fsPerZip<-rename(fsPerZip,"Number of Fire Stations"=n)
+fsPerZip<-arrange(fsPerZip, ZIPCODE)
+#dataset showing number of hospitals and fire stations 
+totalNumHFS<- fsPerZip %>%
+  full_join(hospitalsPerZip)
+totalNumHFS[is.na(totalNumHFS)]<-0
+totalNumHFS<- filter(totalNumHFS, ZIPCODE<=20052)
+```
+#taxable income based off gross income categories per zipcode
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+incomestats<-incomedata[6:212,]
+incomestats<-select(incomestats,"DISTRICT OF COLUMBIA", "...2","...76","...94","...136")
+incomestats<-rename(incomestats, "zip"="DISTRICT OF COLUMBIA", "gross income" = "...2", "Returns for total taxes" = "...76","Returns for taxable income" = "...94", "Returns for income tax"="...136")
+taxableincome<-incomestats[,c(1,2,5)]
+taxableincome<-filter(taxableincome, zip >-1)
+taxableincome[is.na(taxableincome)]<-'Total'
+taxableincome<- mutate(taxableincome, 'Total', 20001,20002,20003,20003,20005,20007,20008,20009,20010,20010,20011,20012,20015,20016,20017,20018,20019,20020,20024,20032,20036,20037)
+taxableincomeB<-taxableincome[1:7,]
+taxableincomeB[c(4)]=taxableincome[1:7,c(3)]
+taxableincomeB[c(5)]=taxableincome[8:14,c(3)]
+taxableincomeB[c(6)]=taxableincome[15:21,c(3)]
+taxableincomeB[c(7)]=taxableincome[22:28,c(3)]
+taxableincomeB[c(8)]=taxableincome[29:35,c(3)]
+taxableincomeB[c(9)]=taxableincome[36:42,c(3)]
+taxableincomeB[c(10)]=taxableincome[43:49,c(3)]
+taxableincomeB[c(11)]=taxableincome[50:56,c(3)]
+taxableincomeB[c(12)]=taxableincome[57:63,c(3)]
+taxableincomeB[c(13)]=taxableincome[64:70,c(3)]
+taxableincomeB[c(14)]=taxableincome[71:77,c(3)]
+taxableincomeB[c(15)]=taxableincome[78:84,c(3)]
+taxableincomeB[c(16)]=taxableincome[85:91,c(3)]
+taxableincomeB[c(17)]=taxableincome[92:98,c(3)]
+taxableincomeB[c(18)]=taxableincome[99:105,c(3)]
+taxableincomeB[c(19)]=taxableincome[106:112,c(3)]
+taxableincomeB[c(20)]=taxableincome[113:119,c(3)]
+taxableincomeB[c(21)]=taxableincome[120:126,c(3)]
+taxableincomeB[c(22)]=taxableincome[127:133,c(3)]
+
+taxableincomeB<-select(taxableincomeB,-zip,-"Returns for income tax")
+taxableincomeB[2:22]<-lapply(taxableincomeB[2:22],as.numeric)
+```
+#Get Percent By Zip Function
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+getPercentbyZip<- function(zipcode) {
+x= which(colnames(taxableincomeB)==zipcode)
+a=as.numeric(taxableincomeB[2,x])
+b=as.numeric(taxableincomeB[3,x])
+c=as.numeric(taxableincomeB[4,x])
+d=as.numeric(taxableincomeB[5,x])
+e=as.numeric(taxableincomeB[6,x])
+f=as.numeric(taxableincomeB[7,x])
+df=c(a,b,c,d,e,f)
+max=0
+Gross_Income = ""
+for(i in seq_along(df)) {
+if(df[[i]] > max){
+max = df[[i]]
+}
+if(df[[i]]==max){
+}}
+category=taxableincomeB[which(taxableincomeB[,x]==max),1]
+if( nrow(category) > 1)
+category[2,1]
+if(nrow(category)==1)
+category
+}#end function
+Zipcodes = CAMAR %>%
+select(ZIPCODE) %>%
+distinct(ZIPCODE) %>%
+arrange(ZIPCODE) %>%
+mutate(Gross_Income="")
+Zipcodes<-Zipcodes[1:20,]
+
+Zipcodes[1,2]="$100,000 under $200,000"
+Zipcodes[2,2]=getPercentbyZip(20002)
+Zipcodes[3,2]=getPercentbyZip(20003)
+Zipcodes[4,2]=getPercentbyZip(20005)
+Zipcodes[5,2]=getPercentbyZip(20007)
+Zipcodes[6,2]=getPercentbyZip(20008)
+Zipcodes[7,2]=getPercentbyZip(20009)
+Zipcodes[8,2]=getPercentbyZip(20010)
+Zipcodes[9,2]=getPercentbyZip(20011)
+Zipcodes[10,2]=getPercentbyZip(20012)
+Zipcodes[11,2]=getPercentbyZip(20015)
+Zipcodes[12,2]=getPercentbyZip(20016)
+Zipcodes[13,2]=getPercentbyZip(20017)
+Zipcodes[14,2]=getPercentbyZip(20018)
+Zipcodes[15,2]=getPercentbyZip(20019)
+Zipcodes[16,2]=getPercentbyZip(20020)
+Zipcodes[17,2]=getPercentbyZip(20024)
+Zipcodes[18,2]=getPercentbyZip(20032)
+Zipcodes[19,2]=getPercentbyZip(20036)
+Zipcodes[20,2]=getPercentbyZip(20037)
+GIpercents<-count(Zipcodes,Gross_Income)
+GIpercents <- mutate(GIpercents, Percentages=n/20)
+GIpercents<- arrange(GIpercents,Gross_Income)
+GIpercents<- rename(GIpercents, "Gross Income Levels"="Gross_Income")
+```
+#mean ranges
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+meanRanges <- mutate(CAMAR.MEAN, MEANRANGE=
+ifelse(floor(mean) %in% 1:250000, "1. 250,000 or less",
+ifelse(floor(mean) %in% 250000:500000, "2. 250,000 to 500,000",
+ifelse(floor(mean) %in% 500000:750000, "3. 500,000 to 750,000",
+ifelse(floor(mean) %in% 750000:1000000, "4. 750,000 to 1 million",
+ifelse(floor(mean) %in% 1000000:5000000, "5. 1 to 5 million", "6. Over 5 million"))))))
+```
+#foreign born population
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+TOTALPOPULATIONCHAR=select(CAMAR_dem,PRICERANGE,PRICE,Tract10, ZIPCODE, LATITUDE, LONGITUDE, GEOID, pct_TotPopACS17, pct_TotPopinHHs, pct_TotUnder5, pct_Hispanic, pct_BlackAloneOrCombo, pct_AmerIndAloneorCombo, pct_AsianAloneOrCombo, pct_NatHawAloneOrCombo, 	
+pct_WhiteAloneOrCombo)%>%
+  group_by(LATITUDE, LONGITUDE)
+
+FOREIGNBORNPOP <- CAMAR_dem %>%
+  select(PRICERANGE,PRICE,Tract10, ZIPCODE, LATITUDE, LONGITUDE, GEOID, pct_TotPopBornOutUS_TotPop, pct_TotPopBornOutUS, pct_FB2010Plus, pct_FB2000Plus, pct_FBNotCit2010Plus, pct_FBNotCit2000Plus) %>%
+```
+#race
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+TP <- TOTALPOPULATIONCHAR %>%
+  group_by(LATITUDE, LONGITUDE, ZIPCODE) %>%
+  summarize_at(vars(pct_Hispanic, pct_BlackAloneOrCombo, pct_AmerIndAloneorCombo, pct_AsianAloneOrCombo, pct_NatHawAloneOrCombo, pct_WhiteAloneOrCombo), mean, na.rm=TRUE)
+TP2 <- TOTALPOPULATIONCHAR %>%
+  group_by(ZIPCODE) %>%
+  summarize_at(vars(pct_Hispanic, pct_BlackAloneOrCombo, pct_AmerIndAloneorCombo, pct_AsianAloneOrCombo, pct_NatHawAloneOrCombo, pct_WhiteAloneOrCombo), mean, na.rm=TRUE)
+TP2 <- TP %>%
+  mutate(DIVERSE =
+  ifelse(pct_WhiteAloneOrCombo >= .5 | pct_BlackAloneOrCombo>= .5  | pct_Hispanic >= .5 | pct_AmerIndAloneorCombo >= .5  | pct_AsianAloneOrCombo >= .5  | pct_NatHawAloneOrCombo >= .5, "no", "yes")
+  )
+TP4 <- TOTALPOPULATIONCHAR %>%
+  group_by(LATITUDE, LONGITUDE, ZIPCODE, PRICE) %>%
+  summarize_at(vars(pct_Hispanic, pct_BlackAloneOrCombo, pct_AmerIndAloneorCombo, pct_AsianAloneOrCombo, pct_NatHawAloneOrCombo, pct_WhiteAloneOrCombo), mean, na.rm=TRUE)
+
+TP5 <- TP4 %>%
+  mutate(
+    PRICE_propW= PRICE*pct_WhiteAloneOrCombo,
+    PRICE_propB= PRICE*pct_BlackAloneOrCombo
+         ) %>%
+  ungroup(LATITUDE, LONGITUDE, ZIPCODE, PRICE)
+
+priceRangesProp <- mutate(TP5, PRICERANGEW=
+ifelse(PRICE_propW <= 250000, "1. 250,000 or less",
+ifelse(PRICE_propW <= 500000, "2. 250,000 to 500,000",
+ifelse(PRICE_propW <= 750000, "3. 500,000 to 750,000",
+ifelse(PRICE_propW <= 1000000, "4. 750,000 to 1 million",
+ifelse(PRICE_propW <= 5000000, "5. 1 to 5 million",
+ifelse(PRICE_propW <= 10000000, "6. 5 to 10 million",
+ifelse(PRICE_propW <= 20000000, "7. 10 to 20 million", "8. over 20 million"))))))), 
+
+PRICERANGEB=
+ifelse(PRICE_propB <= 250000, "1. 250,000 or less",
+ifelse(PRICE_propB <= 500000, "2. 250,000 to 500,000",
+ifelse(PRICE_propB <= 750000, "3. 500,000 to 750,000",
+ifelse(PRICE_propB <= 1000000, "4. 750,000 to 1 million",
+ifelse(PRICE_propB <= 5000000, "5. 1 to 5 million",
+ifelse(PRICE_propB <= 10000000, "6. 5 to 10 million",
+ifelse(PRICE_propB <= 20000000, "7. 10 to 20 million", "8. over 20 million")))))))
+)
+```
+#poverty
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+POVERTY <- CAMAR_dem %>%
+    select(PRICERANGE, PRICE, Tract10, ZIPCODE, LATITUDE, LONGITUDE, GEOID, pct_Poverty_TOTAL, pct_Poverty_Less100, pct_Poverty_Less150, pct_Poverty_Less200) %>%
+  group_by(ZIPCODE)
+
+POV1 <- POVERTY %>%
+  group_by(ZIPCODE, LATITUDE, LONGITUDE, PRICE) %>%
+  summarize_at(vars(pct_Poverty_TOTAL, pct_Poverty_Less100, pct_Poverty_Less150, pct_Poverty_Less200), mean, na.rm=TRUE)
+
+
+POV2<- POV1 %>%
+  mutate(
+    PRICEvPOV = PRICE * pct_Poverty_TOTAL
+  )
+priceRangesPOV <- mutate(POV2, PRICERANGEPOV=
+ifelse(PRICEvPOV <= 250000, "1. 250,000 or less",
+ifelse(PRICEvPOV <= 500000, "2. 250,000 to 500,000",
+ifelse(PRICEvPOV <= 750000, "3. 500,000 to 750,000",
+ifelse(PRICEvPOV <= 1000000, "4. 750,000 to 1 million",
+ifelse(PRICEvPOV <= 5000000, "5. 1 to 5 million",
+ifelse(PRICEvPOV <= 10000000, "6. 5 to 10 million",
+ifelse(PRICEvPOV <= 20000000, "7. 10 to 20 million", "8. over 20 million"))))))))
+```
+#plots we are using for final paper:
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+#price range and poverty distribution
+DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=PRICERANGEPOV), data = priceRangesPOV, size = .5) + 
+  theme(legend.position="right") +
+  ggtitle("Price Range and Poverty Distribution of DC")
+scale_color_brewer(palette = "RdPu")
+
+#bar and pie charts on Gross Income Levels
+bp<- ggplot(GIpercents, aes(x="", y=Percentages, fill=`Gross Income Levels`))+
+geom_bar(width = 1, stat = "identity")
+pie<-bp+coord_polar("y",start=0)
+bp
+pie
+
+#mean prices of house based on zipcode
+DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=MEANRANGE), data = meanRanges, size = .5) + 
+theme(legend.position="right") +
+scale_color_brewer(palette = "YlOrRd") +
+xlab("Longitude")+
+ylab("Latitude")+
+ggtitle("Mean Price of Houses Based on Zipcode")
+
+ZIP.MEAN <- ggplot(data=CAMAR.MEAN, mapping = aes(x = LATITUDE, y = LONGITUDE, color=mean)) +
+geom_point()+
+xlab("Longitude")+
+ylab("Latitude")+
+ggtitle("Mean Price of Houses Based on Zipcode")
+ZIP.MEAN
+
+#race concentration
+DC +   geom_point(aes(x = LONGITUDE, y = LATITUDE, color = pct_WhiteAloneOrCombo), data = TP, alpha=0.25, size = 0.5) + 
+  theme(legend.position="none")+
+xlab("Longitude")+
+ylab("Latitude")+
+ggtitle("Concentration of Whites Based on Location")
+
+DC+  geom_point(aes(x = LONGITUDE, y = LATITUDE, color = pct_BlackAloneOrCombo), data = TP, alpha=0.25, size = 0.5) + 
+  theme(legend.position="none")+
+xlab("Longitude") +
+ylab("Latitude") +
+ggtitle("Concentration of Blacks Based on Location") 
+
+DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color = as.factor(DIVERSE)), data = TP2, alpha=0.25, size = 0.5) 
+
+#table on zip code healthcare statistics
+zipStats
+
+##business enterprise graph- needs work lol
+DC + 
+  geom_point(aes(x = LONGITUDE, y = LATITUDE,col="red"), data = businesses, size = .5) 
+
+#plot on price ranges of houses
+DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=PRICERANGE), data = priceRanges, size = .5) + 
+theme(legend.position="right") +
+scale_color_brewer(palette = "YlOrRd")+
+xlab("Longitude")+
+ylab("Latitude")+
+ggtitle("Price of Houses Based on Geographic Location")
+
+#summary table of pricing data
+summary<-summarize(priceSummary,mean=mean(PRICE),sd=sd(PRICE),min=min(PRICE),max=max(PRICE))
+meanPriceZip<-select(summary,ZIPCODE,mean)
+```
+#modeling for healthcare
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+CAMAR.ZIP = CAMAR[!duplicated(CAMAR$ZIPCODE),]
+CAMAR.ZIP<-select(CAMAR.ZIP, PRICE, ZIPCODE, LATITUDE, LONGITUDE)
+CAMAR.ZIP.AVG <- CAMAR.ZIP %>%
+group_by(ZIPCODE) %>%
+summarize(mean=mean(PRICE))
+CAMAR.MEAN = CAMAR.ZIP %>%
+left_join(CAMAR.ZIP.AVG, by = "ZIPCODE")
+FHSMean <-totalNumHFS %>%
+left_join(CAMAR.ZIP.AVG, by = "ZIPCODE")
+FHSMeanB <- FHSMean %>%
+  full_join(CAMAR)
+FHSMeanB<-select(FHSMeanB,"ZIPCODE", "Number of Fire Stations", "Number of Hospitals", "PRICE")
+FHSMeanB<-rename(FHSMeanB, "NumberofHospitals" = "Number of Hospitals")
+FHSMeanB<-rename(FHSMeanB, "NumberFireStations"="Number of Fire Stations")
+
+HFMod=lm(PRICE~NumberFireStations+NumberofHospitals+NumberFireStations*NumberofHospitals, data=FHSMeanB)
+anova(HFMod)
+#significant: fire stations, hospitals, interaction between fire stations and hospitals
+#significant: uninsured, insignificant: Medicaid
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x))) }
+
+knnc <- as.data.frame(lapply(CAMAR[6:8], normalize))
+
+knnc$Price = CAMAR$PRICE
+trControl <- trainControl(method  = "cv", number  = 5)
+fit <- train(Price ~ .,
+             method     = "knn",
+             tuneGrid   = expand.grid(k = 1:20),
+             trControl  = trControl,
+             data       = knnc)
+
+knnc$Price = CAMAR$PRICE
+trControl <- trainControl(method  = "cv", number  = 5)
+fit <- train(Price ~ .,
+             method     = "knn",
+             tuneGrid   = expand.grid(k = 1:20),
+             trControl  = trControl,
+             data       = knnc)
+```
+
+```{r}
+#put variables into percentage for use
+ZC1 <- ZCS %>%
+  mutate(
+	per_uninsured=UNINSURED_POPULATION/POP_2000,
+	per_medicaid=MEDICAID_RECIPIENT/POP_2000,
+  )
+
+ZC1 <- ZC1 %>% select(ZIPCODE, per_uninsured, per_medicaid, POP_2000)
+
+ZC2 <- left_join(TP5, ZC1, by="ZIPCODE")
+```
+
+
+```{r,warning=FALSE,echo=FALSE}
+P1 <- DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=PRICERANGEW), data = priceRangesProp, size = .5) +
+  theme(legend.position="right") +
+  ggtitle("Price Range and %White Population Distribution")+
+  xlab("Longitude")+
+  ylab("Latitude")+
+  guides(color=guide_legend(title="House Price")) +
+scale_color_brewer(palette = "PuRd")
+
+
+
+P2<- DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=PRICERANGEB), data = priceRangesProp, size = .5) +
+  theme(legend.position="right") +
+	ggtitle("Price Range and %Black Population Distribution")+
+   xlab("Longitude")+
+  ylab("Latitude")+
+  guides(color=guide_legend(title="House Price")) +
+scale_color_brewer(palette = "PuRd")
+
+```
+
+```{r,warning=FALSE,echo=FALSE}
+R1<- DC+  geom_point(aes(x = LONGITUDE, y = LATITUDE, color = pct_WhiteAloneOrCombo), data = TP, alpha=0.25, size = 0.5) +
+  theme(legend.position="right") +
+  ggtitle("%White Population Distribution of DC")+
+xlab("Longitude")+
+  ylab("Latitude")+
+  guides(color=guide_legend(title="Poverty"))
+
+
+R2 <- DC+  geom_point(aes(x = LONGITUDE, y = LATITUDE, color = pct_BlackAloneOrCombo), data = TP, alpha=0.25, size = 0.5)+ theme(legend.position="right") +
+  ggtitle("%Black Population Distribution of DC")+
+xlab("Longitude")+
+  ylab("Latitude")+
+  guides(color=guide_legend(title="Poverty"))
+
+
+
+R3 <- DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=pct_Poverty_Less150), data = POV1, size = .5) +
+  theme(legend.position="right") +
+  ggtitle("Poverty Distribution of DC")+
+xlab("Longitude")+
+  ylab("Latitude")+
+  guides(color=guide_legend(title="Poverty"))
+
+```
+
+
+```{r,warning=FALSE,echo=FALSE}
+DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=POP_2000), data = ZC2, size = .5) +
+  theme(legend.position="right") +
+  ggtitle("Population Distribution of DC in 2000")+
+  guides(color=guide_legend(title="Pop"))
+```
+
+```{r,warning=FALSE,echo=FALSE}
+T1 <- DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=per_uninsured), data = ZC2, size = .5) +
+  theme(legend.position="right") +
+  ggtitle("Uninsured Population Distribution of DC in 2000")+
+  guides(color=guide_legend(title="Uninsured"))
+
+T2 <- DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=per_medicaid), data = ZC2, size = .5) +
+  theme(legend.position="right") +
+  ggtitle("Medicaid Distribution of DC in 2000")+
+  guides(color=guide_legend(title="Medicaid"))
+
+T3 <-DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color=POP_2000), data = ZC2, size = .5) +
+  theme(legend.position="right") +
+  ggtitle("Population Distribution of DC in 2000")+
+  guides(color=guide_legend(title="Pop"))
+
+```
+
+```{r,warning=FALSE,echo=FALSE}
+DC + geom_point(aes(x = LONGITUDE, y = LATITUDE, color = as.factor(DIVERSE)), data = TP2, alpha=0.25, size = 0.5) +
+	theme(legend.position="right") +
+  ggtitle("Diversity Distribution of DC")+
+xlab("Longitude")+
+  ylab("Latitude")+
+  guides(color=guide_legend(title="Diversity"))
+```
